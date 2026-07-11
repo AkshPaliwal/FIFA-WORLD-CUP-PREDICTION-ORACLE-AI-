@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# Virtual Environment
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data
+data/
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Models
+*.pkl
+*.joblib
+data/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.venv/
