@@ -13,9 +13,6 @@
 
 <br/>
 
-<img src="assets/dashboard-preview.png" alt="Dashboard preview" width="850"/>
-
-<sub>⬆️ replace <code>assets/dashboard-preview.png</code> with a real screenshot of your Bracket &amp; Odds tab</sub>
 
 </div>
 
