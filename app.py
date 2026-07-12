@@ -17,17 +17,77 @@ from elo import compute_elo_history, rating_as_of
 from mentality import tag_knockout_matches, match_shootout_winner, first_goal_scorer_per_match, MentalityTracker
 from build_dataset import load_raw, build_all, FEATURE_COLS
 from train_backtest import fit_final_models, leave_one_tournament_out, YEARS
+from live_results import sync_prediction, get_completed_results
 
-st.set_page_config(page_title="World Cup 2026 Forecaster", layout="wide",)
+st.set_page_config(page_title="World Cup 2026 Forecaster", layout="wide", page_icon="🏆")
 
 NOW = pd.Timestamp("2026-12-31")
-QF_TEAMS = ["France", "Spain", "Argentina", "England", "Norway", "Switzerland"]
+SF_TEAMS = ["France", "Spain", "England", "Argentina"]   # remaining 4 after QF results
+ELIMINATED_QF = ["Norway", "Switzerland"]                 # kept only for Team Explorer/history
 
-MARKET_ADVANCE = {
-    ("Norway", "England"): (0.248 + 0.255 / 2, 0.497 + 0.255 / 2),
-    ("Argentina", "Switzerland"): (0.569 + 0.266 / 2, 0.165 + 0.266 / 2),
-    ("France", "Spain"): (0.403 + 0.29 / 2, 0.307 + 0.29 / 2),
+# Manual fallback only -- used if the API-Football key isn't set up yet, or a
+# call fails. Once live_results.py is wired to a real key this list is dead
+# weight; get_completed_results() below takes over automatically and nothing
+# here needs to be touched again after a match.
+QUARTERFINAL_RESULTS_FALLBACK = [
+    {
+        "team_a": "England", "team_b": "Norway",
+        "score_a": 2, "score_b": 1,
+        "pre_model_a": 0.62, "pre_market_a": 0.62,
+    },
+    {
+        "team_a": "Argentina", "team_b": "Switzerland",
+        "score_a": 3, "score_b": 1,
+        "pre_model_a": 0.82, "pre_market_a": 0.70,
+    },
+]
+
+# Known match dates for each round -- used to tell live_results.py which
+# day(s) to check for finished matches. Add the Final's date here once
+# it's scheduled.
+ROUND_DATES = {
+    "Quarter-finals": ["2026-07-11"],
+    "Semi-finals": ["2026-07-14", "2026-07-15"],
 }
+
+# Semifinals are now locked: France vs Spain (Jul 14), England vs Argentina (Jul 15).
+# Market split derived from post-quarterfinal outright championship prices (FanDuel, Jul 11-12):
+# France +150, Spain +310, Argentina +430, England +490 -- implied probabilities normalized
+# WITHIN each semifinal pair (standard de-vig approach) since a clean isolated head-to-head
+# line for England vs Argentina wasn't available at build time. Replace with the exact
+# moneyline once posted for a tighter number.
+MARKET_ADVANCE = {
+    ("France", "Spain"): (0.6212, 0.3788),
+    ("England", "Argentina"): (0.4732, 0.5268),
+}
+
+# Primary flag-derived accent per team -- picked for contrast against a near-black
+# background (i.e. brightened/desaturated slightly from the literal flag hex where
+# the raw color would be unreadable on dark, e.g. Italy's green, Brazil's yellow).
+# Teams not listed fall back to the neutral ink accent.
+FLAG_ACCENT = {
+    "France": "#5B8DEF", "Spain": "#E8B94D", "Argentina": "#7FB8E0", "England": "#D9534F",
+    "Norway": "#D9534F", "Switzerland": "#E0554F", "Brazil": "#F2C230", "Germany": "#E0554F",
+    "Portugal": "#5FAE6E", "Netherlands": "#E8813A", "Belgium": "#E0554F", "Croatia": "#E0554F",
+    "Italy": "#5FAE6E", "Uruguay": "#7FB8E0", "Colombia": "#F2C230", "Mexico": "#5FAE6E",
+    "USA": "#7FB8E0", "United States": "#7FB8E0", "Morocco": "#E0554F", "Senegal": "#5FAE6E",
+    "Japan": "#D9534F", "South Korea": "#7FB8E0", "Korea Republic": "#7FB8E0",
+    "Ghana": "#F2C230", "Cameroon": "#5FAE6E", "Nigeria": "#5FAE6E", "Egypt": "#E0554F",
+    "Algeria": "#5FAE6E", "Tunisia": "#E0554F", "Denmark": "#E0554F", "Sweden": "#F2C230",
+    "Poland": "#D9534F", "Serbia": "#E0554F", "Austria": "#E0554F", "Ukraine": "#E8B94D",
+    "Wales": "#E0554F", "Scotland": "#7FB8E0", "Ireland": "#5FAE6E", "Ecuador": "#F2C230",
+    "Chile": "#E0554F", "Peru": "#E0554F", "Costa Rica": "#7FB8E0", "Canada": "#E0554F",
+    "Australia": "#E8B94D", "Iran": "#5FAE6E", "Saudi Arabia": "#5FAE6E", "Qatar": "#E0554F",
+    "China PR": "#E0554F", "Ivory Coast": "#E8813A", "Paraguay": "#E0554F", "Panama": "#E0554F",
+    "Jordan": "#E0554F", "Iraq": "#E0554F", "Cape Verde": "#7FB8E0", "Haiti": "#7FB8E0",
+    "Bosnia and Herzegovina": "#E8B94D", "New Zealand": "#0F0F0F", "South Africa": "#F2C230",
+    "DR Congo": "#5FAE6E", "Curacao": "#7FB8E0", "Uzbekistan": "#7FB8E0", "Czechia": "#7FB8E0",
+    "Turkey": "#E0554F",
+}
+
+
+def flag_color(team):
+    return FLAG_ACCENT.get(team, ACCENT)
 
 # ---------------------------------------------------------------------------
 # Theme: matte dark, minimal. One neutral surface, one accent (bone white)
@@ -42,6 +102,7 @@ INK_DIM = "#6E6E6C"
 INK_FAINT = "#48484A"
 ACCENT = "#EDEDEC"       # favored team highlight -- same tone as ink, weight does the work
 SIGNAL = "#C97A6D"       # muted terracotta-red, ONLY for model/market divergence flag
+CORRECT = "#7FAE84"      # muted sage-green, ONLY for "model called it right" confirmations
 
 st.markdown(f"""
 <style>
@@ -125,6 +186,51 @@ p, div, span, label, li {{
     border-radius: 3px;
     margin-top: 10px;
     letter-spacing: 0.02em;
+}}
+.result-card {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-left: 2px solid {CORRECT};
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+}}
+.result-card.wrong-call {{ border-left-color: {SIGNAL}; }}
+.result-card .result-line {{
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 0.95rem;
+}}
+.result-card .final-score {{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: {INK};
+}}
+.result-card .pred-line {{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem;
+    color: {INK_FAINT};
+    margin-top: 10px;
+}}
+.result-card .call-badge {{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    border-radius: 3px;
+    margin-left: 8px;
+}}
+.result-card .call-badge.correct {{
+    color: {CORRECT};
+    background: rgba(127, 174, 132, 0.1);
+    border: 1px solid {CORRECT};
+}}
+.result-card .call-badge.wrong {{
+    color: {SIGNAL};
+    background: rgba(201, 122, 109, 0.1);
+    border: 1px solid {SIGNAL};
 }}
 hr {{ border-color: {BORDER} !important; }}
 .stTabs [data-baseweb="tab-list"] {{
@@ -233,7 +339,11 @@ def predict(logit, scaler, gbm, x):
 def scorecard(team_a, team_b, p_a, market_a=None, elo_a=None, elo_b=None):
     p_b = 1 - p_a
     a_favored = p_a >= p_b
-    a_cls, b_cls = ("favored", "underdog") if a_favored else ("underdog", "favored")
+    color_a, color_b = flag_color(team_a), flag_color(team_b)
+    opacity_a = "1" if a_favored else "0.4"
+    opacity_b = "1" if not a_favored else "0.4"
+    weight_a = "700" if a_favored else "400"
+    weight_b = "700" if not a_favored else "400"
 
     flag = ""
     if market_a is not None and abs(p_a - market_a) > 0.15:
@@ -246,12 +356,12 @@ def scorecard(team_a, team_b, p_a, market_a=None, elo_a=None, elo_b=None):
     <div class="scorecard">
         <div class="elo-line">{elo_line}</div>
         <div class="team-row">
-            <span class="team-name {a_cls}">{team_a}</span>
-            <span class="team-pct {a_cls}">{p_a:.0%}</span>
+            <span class="team-name" style="color:{color_a}; opacity:{opacity_a}; font-weight:{weight_a};">{team_a}</span>
+            <span class="team-pct" style="color:{color_a}; opacity:{opacity_a}; font-weight:{weight_a};">{p_a:.0%}</span>
         </div>
         <div class="team-row">
-            <span class="team-name {b_cls}">{team_b}</span>
-            <span class="team-pct {b_cls}">{p_b:.0%}</span>
+            <span class="team-name" style="color:{color_b}; opacity:{opacity_b}; font-weight:{weight_b};">{team_b}</span>
+            <span class="team-pct" style="color:{color_b}; opacity:{opacity_b}; font-weight:{weight_b};">{p_b:.0%}</span>
         </div>
         {market_line}
         {flag}
@@ -259,30 +369,61 @@ def scorecard(team_a, team_b, p_a, market_a=None, elo_a=None, elo_b=None):
     """, unsafe_allow_html=True)
 
 
-def run_monte_carlo(p_nor, p_arg, p_fra_sf1, sf2_probs, final_probs, n=50000, seed=42):
-    """Returns (championship %, semifinal-reach %, final-reach %) per team."""
+def result_card(result):
+    """Render a completed quarterfinal: final score + what the model/market said
+    beforehand, with a correct/wrong call badge for the model's pick."""
+    team_a, team_b = result["team_a"], result["team_b"]
+    score_a, score_b = result["score_a"], result["score_b"]
+    pre_model_a, pre_market_a = result["pre_model_a"], result["pre_market_a"]
+
+    actual_winner = team_a if score_a > score_b else team_b
+    model_picked = team_a if pre_model_a >= 0.5 else team_b
+    model_correct = model_picked == actual_winner
+    market_picked = team_a if pre_market_a >= 0.5 else team_b
+    market_correct = market_picked == actual_winner
+
+    color_a, color_b = flag_color(team_a), flag_color(team_b)
+    card_class = "result-card" if model_correct else "result-card wrong-call"
+    model_badge = (
+        '<span class="call-badge correct">MODEL ✓</span>' if model_correct
+        else '<span class="call-badge wrong">MODEL ✗</span>'
+    )
+    market_badge = (
+        '<span class="call-badge correct">MARKET ✓</span>' if market_correct
+        else '<span class="call-badge wrong">MARKET ✗</span>'
+    )
+
+    st.markdown(f"""
+    <div class="{card_class}">
+        <div class="result-line">
+            <span>
+                <span style="color:{color_a}; font-weight:700;">{team_a}</span>
+                <span class="final-score">&nbsp; {score_a} – {score_b} &nbsp;</span>
+                <span style="color:{color_b}; font-weight:700;">{team_b}</span>
+            </span>
+            <span>{model_badge}{market_badge}</span>
+        </div>
+        <div class="pred-line">
+            PRE-MATCH &nbsp; model: {team_a} {pre_model_a:.0%} / {team_b} {1-pre_model_a:.0%}
+            &nbsp;·&nbsp; market: {team_a} {pre_market_a:.0%} / {team_b} {1-pre_market_a:.0%}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def run_monte_carlo(p_fra_sf1, p_arg_sf2, final_probs, n=50000, seed=42):
+    """Both semifinals are locked -- just two coin-flips into a final.
+    Returns championship % and final-reach % (semifinal-reach is 100% for all 4, omitted)."""
     rng = np.random.default_rng(seed)
-    titles = {t: 0 for t in QF_TEAMS}
-    finalists = {t: 0 for t in QF_TEAMS}
-    semifinalists = {t: 0 for t in QF_TEAMS}
+    titles = {t: 0 for t in SF_TEAMS}
     for _ in range(n):
-        qf1 = "Norway" if rng.random() < p_nor else "England"
-        qf2 = "Argentina" if rng.random() < p_arg else "Switzerland"
-        semifinalists["France"] += 1
-        semifinalists["Spain"] += 1
-        semifinalists[qf1] += 1
-        semifinalists[qf2] += 1
-
         sf1_w = "France" if rng.random() < p_fra_sf1 else "Spain"
-        sf2_w = qf1 if rng.random() < sf2_probs[(qf1, qf2)] else qf2
-        finalists[sf1_w] += 1
-        finalists[sf2_w] += 1
-
+        sf2_w = "Argentina" if rng.random() < p_arg_sf2 else "England"
         champion = sf1_w if rng.random() < final_probs[(sf1_w, sf2_w)] else sf2_w
         titles[champion] += 1
 
     to_pct = lambda d: (pd.Series(d) / n * 100)
-    return to_pct(titles).sort_values(ascending=False), to_pct(finalists), to_pct(semifinalists)
+    return to_pct(titles).sort_values(ascending=False)
 
 
 # ---------------------------------------------------------------------------
@@ -319,56 +460,44 @@ with tab_bracket:
     left, right = st.columns([3, 2])
 
     with right:
-        st.subheader("Pending Quarterfinals")
-        st.caption("Slider defaults to the model+market blend. Drag to explore what-ifs.")
+        st.subheader("Semifinals (locked)")
+        st.caption("Both quarterfinals resolved on July 11 — sliders default to the model+market "
+                   "blend for each semifinal. Drag to explore what-ifs.")
 
-        qf_probs = {}
-        qf_display = {}
-        for a, b in [("Norway", "England"), ("Argentina", "Switzerland")]:
+        sf_display = {}
+        sf_probs = {}
+        for a, b, key in [("France", "Spain", "sf1"), ("Argentina", "England", "sf2")]:
             x, elo_a, elo_b = team_feature_vector(elo_timeline, tracker, a, b)
             p_logit, p_gbm, p_ens = predict(logit, scaler, gbm, x)
-            m_a, _ = MARKET_ADVANCE[(a, b)]
+            m_a, _ = MARKET_ADVANCE[(a, b)] if (a, b) in MARKET_ADVANCE else (1 - MARKET_ADVANCE[(b, a)][0], 0)
             default_blend = (p_ens + m_a) / 2
-            qf_display[(a, b)] = (p_ens, m_a, elo_a, elo_b)
+            sf_display[(a, b)] = (p_ens, m_a, elo_a, elo_b)
 
             p_user = st.slider(f"{a} win probability", 0.0, 1.0, float(round(default_blend, 2)),
-                                key=f"slider_{a}_{b}")
-            qf_probs[(a, b)] = p_user
+                                key=f"slider_{key}")
+            sf_probs[(a, b)] = p_user
 
-        st.subheader("Semifinal 1 (locked)")
-        x, elo_a, elo_b = team_feature_vector(elo_timeline, tracker, "France", "Spain")
-        p_logit, p_gbm, p_ens = predict(logit, scaler, gbm, x)
-        m_a, _ = MARKET_ADVANCE[("France", "Spain")]
-        sf1_default = (p_ens + m_a) / 2
-        p_fra_sf1 = st.slider("France win probability (SF1)", 0.0, 1.0, float(round(sf1_default, 2)))
-        qf_display[("France", "Spain")] = (p_ens, m_a, elo_a, elo_b)
+            # Freeze this pre-match call the first time we see it (no-op on
+            # every rerun after). Uses the model+market blend, not the
+            # slider -- the slider is just a what-if explorer, not the call.
+            try:
+                sync_prediction("Semi-finals", a, b, p_ens, m_a)
+            except Exception:
+                pass  # missing/invalid API key shouldn't break the page
 
-    sf2_candidates = [("Norway", "Argentina"), ("Norway", "Switzerland"),
-                       ("England", "Argentina"), ("England", "Switzerland")]
-    sf2_probs = {}
-    for a, b in sf2_candidates:
-        x, *_ = team_feature_vector(elo_timeline, tracker, a, b)
-        sf2_probs[(a, b)] = predict(logit, scaler, gbm, x)[2]
-
-    final_candidates = [(f, s) for f in ["France", "Spain"] for s in QF_TEAMS if s not in ("France", "Spain")]
+    final_candidates = [(f, s) for f in ["France", "Spain"] for s in ["Argentina", "England"]]
     final_probs = {}
     for a, b in final_candidates:
         x, *_ = team_feature_vector(elo_timeline, tracker, a, b)
         final_probs[(a, b)] = predict(logit, scaler, gbm, x)[2]
 
-    champ_odds, final_odds, semi_odds = run_monte_carlo(
-        qf_probs[("Norway", "England")], qf_probs[("Argentina", "Switzerland")],
-        p_fra_sf1, sf2_probs, final_probs,
+    champ_odds = run_monte_carlo(
+        sf_probs[("France", "Spain")], sf_probs[("Argentina", "England")], final_probs,
     )
 
     with left:
-        st.subheader("Round-by-round odds")
-        roundtable = pd.DataFrame({
-            "Reach Semifinal %": semi_odds.round(1),
-            "Reach Final %": final_odds.round(1),
-            "Win Championship %": champ_odds.round(1),
-        }).loc[champ_odds.index]
-        st.dataframe(roundtable, use_container_width=True)
+        st.subheader("Championship odds")
+        st.dataframe(champ_odds.round(1).rename("Win Championship %").to_frame(), use_container_width=True)
 
         fig, ax = plt.subplots(figsize=(7, 3.6))
         colors = [ACCENT if i == 0 else INK_FAINT for i in range(len(champ_odds))]
@@ -384,10 +513,27 @@ with tab_bracket:
         plt.xticks(family="sans-serif", fontsize=9)
         st.pyplot(fig)
 
-        st.subheader("Matchup scorecards")
-        shown_probs = {**qf_probs, ("France", "Spain"): p_fra_sf1}
-        for (a, b), (p_ens, m_a, ea, eb) in qf_display.items():
-            scorecard(a, b, shown_probs[(a, b)], market_a=m_a, elo_a=ea, elo_b=eb)
+        st.subheader("Quarterfinal results")
+        st.caption("How the model's pre-match call held up against the actual result.")
+        try:
+            live_qf_results = get_completed_results("Quarter-finals", ROUND_DATES["Quarter-finals"])
+        except Exception:
+            live_qf_results = []
+        for result in (live_qf_results or QUARTERFINAL_RESULTS_FALLBACK):
+            result_card(result)
+
+        st.subheader("Semifinal scorecards")
+        try:
+            live_sf_results = {(r["team_a"], r["team_b"]): r for r in get_completed_results("Semi-finals", ROUND_DATES["Semi-finals"])}
+        except Exception:
+            live_sf_results = {}
+        for (a, b), (p_ens, m_a, ea, eb) in sf_display.items():
+            if (a, b) in live_sf_results:
+                result_card(live_sf_results[(a, b)])
+            else:
+                scorecard(a, b, sf_probs[(a, b)], market_a=m_a, elo_a=ea, elo_b=eb)
+
+        st.caption(f"Eliminated in the quarterfinals: {', '.join(ELIMINATED_QF)}.")
 
 # =============================================================================
 # TAB 2: Team Explorer -- pick ANY team, see full history
@@ -396,6 +542,15 @@ with tab_team:
     st.subheader("Explore any national team's history")
     default_idx = all_teams.index("Argentina") if "Argentina" in all_teams else 0
     team = st.selectbox("Team", all_teams, index=default_idx)
+    team_color = flag_color(team)
+
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:10px;margin:4px 0 18px 0;">'
+        f'<div style="width:14px;height:14px;border-radius:3px;background:{team_color};"></div>'
+        f'<span style="font-size:1.3rem;font-weight:700;color:{team_color};">{team}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     elo_hist = elo_timeline.get(team, [])
     if elo_hist:
@@ -407,19 +562,36 @@ with tab_team:
 
     snap = tracker._get(NOW, team)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current Elo", f"{current_elo:.0f}")
-    c2.metric("WC knockout matches", int(snap["ko_played"]))
-    c3.metric("Knockout win rate", f"{snap['ko_win_rate']:.0%}" if pd.notna(snap["ko_win_rate"]) else "—")
-    c4.metric("Shootout record", f"{snap['shootout_win_rate']:.0%}" if pd.notna(snap["shootout_win_rate"]) else "no shootouts")
+    def metric_card(label, value, accent):
+        st.markdown(f"""
+        <div style="background:{SURFACE};border:1px solid {BORDER};border-top:2px solid {accent};
+                    border-radius:6px;padding:14px 16px;">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.68rem;color:{INK_FAINT};
+                        text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">{label}</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;font-weight:600;color:{accent};">{value}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Current Elo", f"{current_elo:.0f}", team_color)
+    with c2:
+        metric_card("WC knockout matches", int(snap["ko_played"]), team_color)
+    with c3:
+        metric_card("Knockout win rate", f"{snap['ko_win_rate']:.0%}" if pd.notna(snap["ko_win_rate"]) else "—", team_color)
+    with c4:
+        metric_card("Shootout record",
+                     f"{snap['shootout_win_rate']:.0%}" if pd.notna(snap["shootout_win_rate"]) else "no shootouts",
+                     team_color)
+
+    st.markdown("")
     st.markdown(f"**Comeback rate** (avoided loss after conceding first, WC knockouts): "
                 f"{snap['comeback_rate']:.0%}" if pd.notna(snap["comeback_rate"]) else "**Comeback rate:** n/a")
 
     if not hist_df.empty:
         st.subheader(f"{team} — Elo rating over time (1872–2026)")
         fig, ax = plt.subplots(figsize=(9, 3.0))
-        ax.plot(hist_df["date"], hist_df["elo"], color=ACCENT, linewidth=1.1)
+        ax.plot(hist_df["date"], hist_df["elo"], color=team_color, linewidth=1.3)
         ax.axhline(1500, color=BORDER, linewidth=0.8, linestyle="--")
         ax.spines[["top", "right"]].set_visible(False)
         for spine in ax.spines.values():
