@@ -1,115 +1,179 @@
-# World Cup 2026 Knockout Forecaster
+<div align="center">
 
-Predicts the rest of the 2026 FIFA World Cup bracket by combining a from-scratch
-Elo rating with a set of "knockout mentality" features (penalty-shootout record,
-comeback rate, knockout-specific win rate) learned from 2006–2022 World Cup
-history, then simulating the remaining bracket with Monte Carlo.
+# 🏆 World Cup 2026 Knockout Forecaster
 
-## Why this exists
+### Elo ratings + career knockout-mentality features, trained on 2006–2022, validated live against the 2026 bracket.
 
-Predicting a single knockout match is a genuinely noisy problem — one team, one
-elimination, one bad bounce. Rather than pretend a model can call outright
-winners, this project reports **calibrated win probabilities** and simulates the
-bracket forward thousands of times, the same way FiveThirtyEight-style
-tournament models work.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-Logit%20%2B%20GBM-F7931E?logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
+[![Data](https://img.shields.io/badge/Match%20history-1872--2026-8A2BE2)]()
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/AkshPaliwal/FIFA-WORLD-CUP-PREDICTION-ORACLE-AI-)]()
 
-The specific question it asks: beyond raw team quality, does a team's *history
-of performing under knockout pressure* add real signal? The answer, honestly,
-is "some of it does, some of it doesn't" — see Limitations below.
+<br/>
 
-## Result (captured at the Quarterfinal stage, July 11 2026)
+<img src="assets/dashboard-preview.png" alt="Dashboard preview" width="850"/>
 
-| Team | Championship probability |
-|---|---|
-| France | 36.0% |
-| Spain | 28.4% |
-| Argentina | 26.0% |
-| England | 8.8% |
-| Norway | 0.6% |
-| Switzerland | 0.2% |
+<sub>⬆️ replace <code>assets/dashboard-preview.png</code> with a real screenshot of your Bracket &amp; Odds tab</sub>
 
-Full reasoning, charts, and the model-vs-live-market comparison are in
-`world_cup_2026_forecast.ipynb`.
+</div>
 
-## Method
+<br/>
 
-1. **Elo rating** — computed match-by-match over 49k+ international matches
-   (1872–2026), all competitions, with a competition-importance-weighted K-factor
-   and a goal-difference multiplier. Fully chronological — a team's rating on any
-   date only reflects matches played before it.
-2. **Knockout mentality features** — career-to-date, leakage-free, computed per
-   team before every match: knockout matches played, knockout win rate, average
-   knockout goal margin, penalty-shootout win rate, comeback rate (win/draw rate
-   after conceding the first goal of the match).
-3. **Model** — logistic regression and gradient boosting (`HistGradientBoostingClassifier`),
-   backtested with **leave-one-tournament-out cross-validation** (train on 4 World
-   Cups, test on the held-out 5th, rotate through all 5) so no tournament ever
-   leaks into its own test fold.
-4. **Live application** — the trained model is pointed at the real, live 2026
-   bracket, blended 50/50 with live market-implied odds for the two undecided
-   Quarterfinals, then simulated forward 50,000 times.
+## ⚡ What this is
 
-### Backtest results (5-fold leave-one-tournament-out, 80 knockout matches total)
+A live-updating knockout forecaster for the 2026 FIFA World Cup. Every matchup is scored two ways:
 
-| Model | Accuracy | Log-loss | Brier |
+- **Elo**, computed from 150+ years of international match history (1872–2026)
+- **Knockout mentality features** — a team's career penalty-shootout record, comeback rate, and knockout win rate specifically in World Cup knockout matches, on the theory that "big game temperament" is a real, measurable signal separate from overall strength
+
+Both feed a logistic regression and a gradient-boosted model, ensembled together and cross-validated with a **leave-one-tournament-out backtest** across every World Cup from 2006–2022.
+
+Predictions are frozen the moment they're made — and automatically checked against real results the moment matches finish. No manual updating.
+
+<br/>
+
+## 🎯 Live prediction record
+
+The model doesn't just predict — it keeps score on itself.
+
+| Match | Result | Model said (pre-match) | Market said | Call |
+|---|---|---|---|---|
+| 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England vs Norway | **2–1** | England 62% | England 62% | ✅ Correct |
+| 🇦🇷 Argentina vs Switzerland | **3–1** | Argentina 82% | Argentina 70% | ✅ Correct — model was *more* confident than the market, and right |
+
+<sub>Updated automatically as later rounds finish — see <a href="#-live-result-tracking">Live Result Tracking</a> below.</sub>
+
+<br/>
+
+## 🧠 Model validation
+
+Leave-one-tournament-out backtest, 2006–2022, 80 knockout matches:
+
+| Model | Accuracy | Log Loss ↓ | Brier ↓ |
 |---|---|---|---|
-| Gradient boosting | 71.3% | 0.573 | 0.183 |
-| Logistic regression | 71.3% | 0.593 | 0.201 |
-| Elo-only baseline | 71.3% | 0.898 | 0.261 |
+| Elo-only baseline | 0.712 | 0.898 | 0.261 |
+| Gradient Boosting | 0.675 | 0.585 | 0.194 |
+| **Logistic Regression** | **0.738** | 0.585 | 0.197 |
 
-All three pick the right team about as often, but the mentality-augmented models
-are **much better calibrated** — the Elo-only baseline is a blunt 0/1 pick with no
-real probability estimate behind it, which is what the much worse log-loss/Brier
-reflects.
+All three pick the winner about as often — but the mentality-augmented models are **substantially better calibrated** (lower log-loss/Brier) than Elo alone. Translation: when the augmented models say 70%, it actually happens close to 70% of the time.
 
-## Limitations (read this before trusting any number here)
+<br/>
 
-- **Small sample.** Only 80 World Cup knockout matches exist in the 2006–2022
-  window. Treat probabilities as directionally useful, not precise.
-- **Shootout record is close to uninformative.** Most teams have played 5 or
-  fewer career World Cup shootouts — not enough to reliably detect a "nerve"
-  effect, even if one exists.
-- **Teams with little World Cup knockout history get a near-blank mentality
-  signal.** Norway has 4 career knockout matches and 0 shootouts in this dataset
-  — the model effectively falls back to Elo for them.
-- **No player-level data.** Injuries, suspensions, and current squad form aren't
-  modeled. The clearest evidence of this gap: the model is notably more bullish
-  on Argentina and France than live market odds are, likely because the model
-  is leaning on historical pedigree the market has already priced past.
+## 🗺️ How a prediction flows through the system
 
-## Project layout
-
-```
-elo.py                 # chronological Elo rating engine
-mentality.py            # knockout-stage tagging + "mentality" feature tracker
-build_dataset.py        # builds the 2006-2022 training set (auto-downloads data)
-train_backtest.py       # trains + leave-one-tournament-out backtest
-forecast_2026.py        # applies the model to the live bracket + Monte Carlo sim
-world_cup_2026_forecast.ipynb   # full narrative version with charts
-data/                    # auto-downloaded on first run, gitignored
+```mermaid
+flowchart LR
+    A[1872–2026 match history] --> B[Elo engine]
+    C[WC knockout matches 2006–2026] --> D[Mentality tracker<br/>shootouts · comebacks · win rate]
+    B --> E[Feature vector]
+    D --> E
+    E --> F[Logistic Regression]
+    E --> G[Gradient Boosting]
+    F --> H[Ensemble]
+    G --> H
+    H --> I[Prediction frozen<br/>SQLite log]
+    J[SportAPI7<br/>live results] -->|match finishes| K{Team names<br/>match a frozen<br/>prediction?}
+    I --> K
+    K -->|yes| L[✅ Result card<br/>auto-rendered]
 ```
 
-## Running it
+<br/>
+
+## ✨ Features
+
+- 🏟️ **Bracket & Odds** — Monte Carlo–simulated championship odds across the full remaining bracket, with model/market divergence flagged automatically
+- 🔍 **Team Explorer** — Elo history back to 1872, knockout record, and shootout stats for any national team
+- ⚔️ **Head-to-Head** — run any two teams against each other, neutral venue or not, regardless of whether they're in the live bracket
+- 📊 **Model Validation** — full backtest transparency, per-tournament breakdown included
+- 🔄 **Live Result Tracking** — see below
+
+<br/>
+
+## 🔄 Live result tracking
+
+This is the part that makes the app self-maintaining:
+
+1. **Prediction freezing** — the instant a fixture is upcoming, its model + market probability is written *once* to a local SQLite log. Reruns never overwrite it — that's the permanent record of "what we called beforehand."
+2. **Automatic verification** — on every page load, the app checks [SportAPI7](https://rapidapi.com/rapidsportapi/api/sportapi7) for finished matches, matches them by team name against the frozen predictions, and swaps the live slider for a result card automatically.
+
+No match ever needs its result typed in by hand.
+
+<details>
+<summary><strong>Setup: environment variables</strong></summary>
+
+<br/>
 
 ```bash
-pip install -r requirements.txt
-
-# quick path: backtest metrics + coefficients
-python train_backtest.py
-
-# live forecast + Monte Carlo bracket simulation
-python forecast_2026.py
-
-# full narrative version with charts and write-up
-jupyter notebook world_cup_2026_forecast.ipynb
+export RAPIDAPI_KEY="your-rapidapi-key"
 ```
 
-No manual data download needed — `build_dataset.py` pulls the CSVs straight from
-the source GitHub repo into a local `data/` folder the first time you run
-anything. Because the source dataset is live-updated, re-running this after
-future match results will pick up newer numbers automatically.
+or, for Streamlit Cloud / persistent local use, create `.streamlit/secrets.toml`:
 
-## Data source
+```toml
+RAPIDAPI_KEY = "your-rapidapi-key"
+```
 
-[martj42/international_results](https://github.com/martj42/international_results)
-— 49k+ international football results, 1872–present, CC0-licensed.
+</details>
+
+<br/>
+
+## 🚀 Quickstart
+
+```bash
+git clone https://github.com/AkshPaliwal/FIFA-WORLD-CUP-PREDICTION-ORACLE-AI-.git
+cd FIFA-WORLD-CUP-PREDICTION-ORACLE-AI-
+
+pip install -r requirements.txt
+export RAPIDAPI_KEY="your-rapidapi-key"
+
+streamlit run app.py
+```
+
+Then open **http://localhost:8501**.
+
+<br/>
+
+## 📁 Project structure
+
+```
+.
+├── app.py                 # Streamlit dashboard — all 4 tabs
+├── elo.py                 # Elo rating engine (1872–2026)
+├── mentality.py            # Knockout-mentality feature tracker
+├── build_dataset.py        # Feature matrix construction
+├── train_backtest.py       # Model training + leave-one-tournament-out backtest
+├── live_results.py         # SportAPI7 client + prediction-freezing SQLite log
+├── requirements.txt
+└── .streamlit/
+    └── secrets.toml         # (gitignored) RAPIDAPI_KEY lives here
+```
+
+<br/>
+
+<details>
+<summary><strong>🛣️ Roadmap</strong></summary>
+
+<br/>
+
+- [ ] Auto-populate the Final once it's scheduled
+- [ ] Deploy properly always-on (Streamlit Community Cloud) so results update even with no one watching the tab
+- [ ] Historical accuracy tracker across the whole tournament, not just the two most recent rounds
+- [ ] Confidence intervals on championship odds, not just point estimates
+
+</details>
+
+<br/>
+
+## 📜 License
+
+MIT — see [LICENSE](LICENSE).
+
+<br/>
+
+<div align="center">
+
+Built by <a href="https://github.com/AkshPaliwal">Aksh Paliwal</a>
+
+</div>
